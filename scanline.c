@@ -70,6 +70,7 @@ typedef struct scanline {
     uint8_t mask;
     bool rate_adjusted;
     uint32_t rate_factor;
+    float power;
     uint16_t lut[256];
     uint8_t *data;
     uint32_t size;
@@ -129,6 +130,12 @@ static on_report_options_ptr on_report_options;
 static on_parser_init_ptr on_parser_init;
 static on_reset_ptr on_reset;
 static on_program_completed_ptr on_program_completed;
+static on_execute_realtime_ptr on_execute_realtime;
+static settings_changed_ptr on_settings_changed;
+static struct {
+    float saved;
+    bool active;
+} reported;
 static float modal_floor = 0.0f;
 
 static inline uint_fast8_t pixel_level (const scanline_t *line, uint32_t idx)
@@ -158,20 +165,28 @@ ISR_CODE static void ISR_FUNC(update_want)(void)
     int32_t off = (int32_t)laser->pwm_off_value;
 
     run.want = run.level != LEVEL_OFF
-                ? (uint32_t)(off + ((((int32_t)run.line->lut[run.level] - off) * (int32_t)run.scale) / SCALE_ONE))
+                ? (uint32_t)(off + ((((int32_t)run.line->lut[run.level] - off) * (int32_t)run.scale + SCALE_ONE / 2) / SCALE_ONE))
                 : (uint32_t)off;
 }
 
-ISR_CODE static void ISR_FUNC(update_scale)(stepper_t *stepper)
+// The interval after the last pulse of a segment is timed by the next segment.
+ISR_CODE static inline segment_t *ISR_FUNC(timing_segment)(stepper_t *stepper)
+{
+    segment_t *segment = stepper->exec_segment;
+
+    return stepper->step_count == 0 && segment->next->exec_block == segment->exec_block ? segment->next : segment;
+}
+
+ISR_CODE static void ISR_FUNC(update_scale)(segment_t *segment)
 {
     uint32_t scale = SCALE_ONE;
 
-    run.segment = stepper->exec_segment;
+    run.segment = segment;
 
     if(run.line->rate_adjusted) {
         uint64_t cycles = (uint64_t)run.segment->cycles_per_tick << (run.segment->amass_level + RATE_SHIFT);
         if(cycles > run.rate_factor)
-            scale = (uint32_t)(((uint64_t)run.rate_factor * SCALE_ONE) / cycles);
+            scale = (uint32_t)(((uint64_t)run.rate_factor * SCALE_ONE + cycles / 2) / cycles);
     }
 
     if(laser->param->override_pct < 100)
@@ -206,7 +221,7 @@ ISR_CODE static void ISR_FUNC(line_start)(scanline_t *line, stepper_t *stepper)
     }
 
     if(run.line) {
-        update_scale(stepper);
+        update_scale(timing_segment(stepper));
         update_want();
         laser_write(run.want);
     }
@@ -251,10 +266,12 @@ ISR_CODE static void ISR_FUNC(scan_pulse_start)(stepper_t *stepper)
                 level = pixel_level(line, ++run.idx);
             }
 
-            if(level != run.level || run.segment != stepper->exec_segment) {
+            segment_t *segment = timing_segment(stepper);
+
+            if(level != run.level || run.segment != segment) {
                 run.level = level;
-                if(run.segment != stepper->exec_segment)
-                    update_scale(stepper);
+                if(run.segment != segment)
+                    update_scale(segment);
                 update_want();
             }
 
@@ -668,6 +685,7 @@ static void scan_execute (parser_block_t *gc_block)
 
     power = gc_block->words.s ? gc_block->values.s : spindle->rpm;
     spindle->rpm = power;
+    line->power = power;
     modal_floor = job.floor;
     levels = line->mask;
     for(level = 0; level <= levels; level++) {
@@ -763,6 +781,25 @@ static void scan_program_completed (program_flow_t program_flow, bool check_mode
         on_program_completed(program_flow, check_mode);
 }
 
+// The status report reads the S value from the laser's own parameters, which the core does not update for a scan line.
+static void scan_realtime (sys_state_t state)
+{
+    scanline_t *line = run.line;
+
+    if(line) {
+        if(!reported.active) {
+            reported.active = true;
+            reported.saved = laser->param->rpm_overridden;
+        }
+        laser->param->rpm_overridden = laser->param->override_pct < 100 ? line->power * 0.01f * (float)laser->param->override_pct : line->power;
+    } else if(reported.active) {
+        reported.active = false;
+        laser->param->rpm_overridden = reported.saved;
+    }
+
+    on_execute_realtime(state);
+}
+
 static void scan_parser_init (parser_state_t *gc_state)
 {
     slots_release();
@@ -778,6 +815,25 @@ ISR_CODE static void ISR_FUNC(scan_reset)(void)
 
     if(on_reset)
         on_reset();
+}
+
+// Drivers reassign the stepper entry points when settings change.
+static void scan_settings_changed (settings_t *settings, settings_changed_flags_t changed)
+{
+    stepper_pulse_start_ptr pulse_start = hal.stepper.pulse_start;
+    stepper_go_idle_ptr go_idle = hal.stepper.go_idle;
+
+    on_settings_changed(settings, changed);
+
+    if(hal.stepper.pulse_start != pulse_start) {
+        stepper_pulse_start = hal.stepper.pulse_start;
+        hal.stepper.pulse_start = scan_pulse_start;
+    }
+
+    if(hal.stepper.go_idle != go_idle) {
+        stepper_go_idle = hal.stepper.go_idle;
+        hal.stepper.go_idle = scan_go_idle;
+    }
 }
 
 static void report_options (bool newopt)
@@ -817,6 +873,9 @@ void scanline_init (void)
     stepper_go_idle = hal.stepper.go_idle;
     hal.stepper.go_idle = scan_go_idle;
 
+    on_settings_changed = grbl.on_settings_changed;
+    grbl.on_settings_changed = scan_settings_changed;
+
     on_report_options = grbl.on_report_options;
     grbl.on_report_options = report_options;
 
@@ -825,6 +884,9 @@ void scanline_init (void)
 
     on_program_completed = grbl.on_program_completed;
     grbl.on_program_completed = scan_program_completed;
+
+    on_execute_realtime = grbl.on_execute_realtime;
+    grbl.on_execute_realtime = scan_realtime;
 
     on_reset = grbl.on_reset;
     grbl.on_reset = scan_reset;
