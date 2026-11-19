@@ -740,7 +740,8 @@ static void scan_execute (parser_block_t *gc_block)
     first = lroundf(job.start[idx] * spm);
     line->lead_steps = (uint32_t)labs(first - from);
     line->image_steps = (uint32_t)labs(lroundf(job.end[idx] * spm) - first);
-    rate = (float)hal.f_step_timer * 60.0f * travel / ((float)line->total_steps * block->programmed_rate) * (float)(1 << RATE_SHIFT);
+    // The core rounds a segment's step period up to whole timer counts, from a float that can land above a whole ideal.
+    rate = (floorf((float)hal.f_step_timer * 60.0f * travel / ((float)line->total_steps * block->programmed_rate)) + 1.0f) * (float)(1 << RATE_SHIFT);
     line->rate_factor = rate < 4294967040.0f ? (uint32_t)lroundf(rate) : UINT32_MAX;
 
     if(line->pixels > line->image_steps)
