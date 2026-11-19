@@ -50,6 +50,15 @@
 #define RATE_SHIFT 8
 #define PWM_UNKNOWN UINT32_MAX
 
+// Ticks before the driver's step timer applies a new period. The STM32 drivers count down from a value loaded at the start of a tick.
+#ifndef SCANLINE_PERIOD_DELAY
+#ifdef TIM_CR1_DIR
+#define SCANLINE_PERIOD_DELAY 1
+#else
+#define SCANLINE_PERIOD_DELAY 0
+#endif
+#endif
+
 typedef enum {
     Slot_Free = 0,
     Slot_Filling,
@@ -66,6 +75,7 @@ typedef struct scanline {
     uint32_t image_steps;
     uint32_t total_steps;
     axes_signals_t axis;
+    uint8_t axis_idx;
     uint8_t bits;
     uint8_t mask;
     bool rate_adjusted;
@@ -79,6 +89,7 @@ typedef struct scanline {
 static struct {
     scanline_t *line;
     segment_t *segment;
+    uint64_t cycles;
     uint32_t step;
     uint32_t acc;
     uint32_t idx;
@@ -169,22 +180,32 @@ ISR_CODE static void ISR_FUNC(update_want)(void)
                 : (uint32_t)off;
 }
 
-// The interval after the last pulse of a segment is timed by the next segment.
-ISR_CODE static inline segment_t *ISR_FUNC(timing_segment)(stepper_t *stepper)
+// Timer counts from this pulse to the next on the scan axis. With AMASS the interval can span two segments.
+ISR_CODE static uint64_t ISR_FUNC(step_cycles)(stepper_t *stepper)
 {
-    segment_t *segment = stepper->exec_segment;
+    segment_t *segment = stepper->exec_segment, *next = segment->next;
+    uint_fast8_t axis = run.line->axis_idx;
+    uint32_t left = stepper->step_event_count - stepper->counter.value[axis],
+             ticks = left / stepper->steps.value[axis] + 1;
 
-    return stepper->step_count == 0 && segment->next->exec_block == segment->exec_block ? segment->next : segment;
+    if(ticks <= stepper->step_count || next->exec_block != segment->exec_block)
+        return (uint64_t)segment->cycles_per_tick * ticks;
+
+    left -= stepper->step_count * stepper->steps.value[axis];
+    ticks = left / (stepper->exec_block->steps.value[axis] >> next->amass_level) + 1 - SCANLINE_PERIOD_DELAY;
+
+    return (uint64_t)segment->cycles_per_tick * (stepper->step_count + SCANLINE_PERIOD_DELAY) + (uint64_t)next->cycles_per_tick * ticks;
 }
 
-ISR_CODE static void ISR_FUNC(update_scale)(segment_t *segment)
+ISR_CODE static void ISR_FUNC(update_scale)(stepper_t *stepper, uint64_t cycles)
 {
     uint32_t scale = SCALE_ONE;
 
-    run.segment = segment;
+    run.segment = stepper->exec_segment;
+    run.cycles = cycles;
 
     if(run.line->rate_adjusted) {
-        uint64_t cycles = (uint64_t)run.segment->cycles_per_tick << (run.segment->amass_level + RATE_SHIFT);
+        cycles <<= RATE_SHIFT;
         if(cycles > run.rate_factor)
             scale = (uint32_t)(((uint64_t)run.rate_factor * SCALE_ONE + cycles / 2) / cycles);
     }
@@ -221,7 +242,7 @@ ISR_CODE static void ISR_FUNC(line_start)(scanline_t *line, stepper_t *stepper)
     }
 
     if(run.line) {
-        update_scale(timing_segment(stepper));
+        update_scale(stepper, (uint64_t)stepper->exec_segment->cycles_per_tick << stepper->exec_segment->amass_level);
         update_want();
         laser_write(run.want);
     }
@@ -266,12 +287,13 @@ ISR_CODE static void ISR_FUNC(scan_pulse_start)(stepper_t *stepper)
                 level = pixel_level(line, ++run.idx);
             }
 
-            segment_t *segment = timing_segment(stepper);
+            uint64_t cycles = step_cycles(stepper);
+            bool rescale = cycles != run.cycles || run.segment != stepper->exec_segment;
 
-            if(level != run.level || run.segment != segment) {
+            if(level != run.level || rescale) {
                 run.level = level;
-                if(run.segment != segment)
-                    update_scale(segment);
+                if(rescale)
+                    update_scale(stepper, cycles);
                 update_want();
             }
 
@@ -733,6 +755,8 @@ static void scan_execute (parser_block_t *gc_block)
 
     if(idx == N_AXIS)
         idx = 0;
+
+    line->axis_idx = idx;
 
     // Counted between the rounded step positions the planner uses, so the pixels cover exactly their own steps.
     spm = settings.axis[idx].steps_per_mm;

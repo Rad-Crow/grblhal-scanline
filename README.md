@@ -94,6 +94,7 @@ A rejected `M390` discards the pending pixel data. A `$SLH` that follows a faile
 | `SCANLINE_ENABLE` | unset | Set to 1 to compile the plugin |
 | `SCANLINE_POOL_SIZE` | 32768 | Pixel data bytes shared by all buffered lines |
 | `SCANLINE_QUEUE_SIZE` | 8 | Lines buffered ahead of motion |
+| `SCANLINE_PERIOD_DELAY` | 1 on STM32 drivers, else 0 | Ticks before the driver's step timer applies a new period |
 
 Call `scanline_init()` from `my_plugin_init()`.
 
