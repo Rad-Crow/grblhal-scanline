@@ -43,7 +43,7 @@
 #define SCANLINE_QUEUE_SIZE 8
 #endif
 
-#define SCANLINE_MCODE 230
+#define SCANLINE_MCODE 390
 #define SCANLINE_VERSION "0.01"
 #define SCALE_ONE 32768
 #define LEVEL_OFF 256
@@ -852,7 +852,7 @@ static void report_options (bool newopt)
 void scanline_init (void)
 {
     static const sys_command_t command_list[] = {
-        {"SLH", scan_data, {0}, { .str = "append hex pixel data for the next M230" } }
+        {"SLH", scan_data, {0}, { .str = "append hex pixel data for the next M390" } }
     };
 
     static sys_commands_t commands = {

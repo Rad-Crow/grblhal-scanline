@@ -6,10 +6,10 @@ grblHAL plugin. Adds a raster scanline move: one planner block per line, with la
 
 | Command | Action |
 |---|---|
-| `$SLH=<hex>` | Append pixel data for the next `M230`. Repeat to send a line in chunks. |
-| `M230 X.. Y.. Z.. [I.. J.. K..] P.. Q.. [R..] [S..] [D..] [E1]` | Scan to the target, spreading the pixels evenly along the move. |
+| `$SLH=<hex>` | Append pixel data for the next `M390`. Repeat to send a line in chunks. |
+| `M390 X.. Y.. Z.. [I.. J.. K..] P.. Q.. [R..] [S..] [D..] [E1]` | Scan to the target, spreading the pixels evenly along the move. |
 
-### M230 words
+### M390 words
 
 | Word | Meaning |
 |---|---|
@@ -18,11 +18,11 @@ grblHAL plugin. Adds a raster scanline move: one planner block per line, with la
 | `P` | Pixel count. |
 | `Q` | Bits per pixel: 1, 2, 4 or 8. |
 | `R` | Overscan distance, at least one step. Optional; default is the distance needed to reach `F` from rest plus the distance covered at `F` in one acceleration tick. |
-| `E` | `E1`: the line continues in the next `M230`. Optional. |
+| `E` | `E1`: the line continues in the next `M390`. Optional. |
 | `S` | Power of the highest pixel value. Optional; default is the modal `S`. |
 | `D` | Power of pixel value 0, in `S` units, at most `S`. Optional; default is the last `D`. |
 
-`F` and `S` are modal, as on a `G1` line. `D` is modal across `M230` lines; reset, `M2` and `M30` set it to 0.
+`F` and `S` are modal, as on a `G1` line. `D` is modal across `M390` lines; reset, `M2` and `M30` set it to 0.
 
 ### Pixel data
 
@@ -40,14 +40,14 @@ grblHAL plugin. Adds a raster scanline move: one planner block per line, with la
 
 ### Overscan
 
-The tool rapids from wherever it is to the overscan distance before the start, scans to the same distance beyond the target and stops there. Every `M230` has overscan, so a pixel never starts on the first step of a move.
+The tool rapids from wherever it is to the overscan distance before the start, scans to the same distance beyond the target and stops there. Every `M390` has overscan, so a pixel never starts on the first step of a move.
 
 ### Continued lines
 
-A line longer than the pixel pool is sent as consecutive `M230` moves, all but the last with `E1`.
+A line longer than the pixel pool is sent as consecutive `M390` moves, all but the last with `E1`.
 
 - `E1` leaves out the overscan after the target.
-- An `M230` that starts where an `E1` move ended, in the same direction, has no overscan before the start. Its first pixel starts on the last step of the move before it.
+- An `M390` that starts where an `E1` move ended, in the same direction, has no overscan before the start. Its first pixel starts on the last step of the move before it.
 - A different direction from that position is rejected.
 
 ## Example
@@ -55,9 +55,9 @@ A line longer than the pixel pool is sent as consecutive `M230` moves, all but t
 ```
 M4 S1000
 $SLH=F0F0
-M230 X26 Y20 I16 P16 Q1 F30000
+M390 X26 Y20 I16 P16 Q1 F30000
 $SLH=0F0F
-M230 X10 Y20.1 I-16 P16 Q1
+M390 X10 Y20.1 I-16 P16 Q1
 ```
 
 ## Errors
@@ -74,7 +74,7 @@ M230 X10 Y20.1 I-16 P16 Q1
 | 28 | `P` or `Q` is missing |
 | 39 | Value out of range, zero-length move, more pixels than steps, `R` shorter than one step, `D` above `S`, or data length does not match `P` and `Q` |
 
-A rejected `M230` discards the pending pixel data. A `$SLH` that follows a failed `$SLH` starts the data again.
+A rejected `M390` discards the pending pixel data. A `$SLH` that follows a failed `$SLH` starts the data again.
 
 ## Discovery
 
@@ -84,7 +84,7 @@ A rejected `M230` discards the pending pixel data. A `$SLH` that follows a faile
 
 - Requires laser mode (`$32=1`).
 - Pixel count cannot exceed the step count of the longest axis in the move.
-- `M230` does not move in check mode.
+- `M390` does not move in check mode.
 - Automatic overscan uses the programmed feed rate and the acceleration and maximum rate settings of the axes in the move. A feed override above 100 % in effect when the line is queued is included; lines already queued when it is raised are not adjusted.
 
 ## Build
